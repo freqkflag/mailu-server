@@ -1,0 +1,236 @@
+
+version: '3.8'
+
+services:
+  redis:
+    image: redis:alpine
+    restart: always
+    networks:
+      - mailu_network
+    labels:
+      - "com.example.description=Redis caching service"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+    deploy:
+      resources:
+        limits:
+          cpus: '0.50'
+          memory: '256M'
+
+  front:
+    image: mailu/nginx:2.0
+    restart: always
+    env_file: .env
+    networks:
+      - mailu_network
+    ports:
+      - "80:80"
+      - "443:443"
+      - "25:25"
+      - "465:465"
+      - "587:587"
+      - "110:110"
+      - "995:995"
+      - "143:143"
+      - "993:993"
+      - "4190:4190"
+    volumes:
+      - certs:/certs
+      - overrides:/overrides
+    secrets:
+      - DOMAIN
+      - HOSTNAMES
+    depends_on:
+      - resolver
+      - admin
+      - imap
+      - smtp
+      - antivirus
+      - antispam
+    labels:
+      - "com.example.description=Mailu front-end"
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost"]
+      interval: 1m
+      timeout: 10s
+      retries: 3
+    deploy:
+      resources:
+        limits:
+          cpus: '1.00'
+          memory: '512M'
+
+  resolver:
+    image: mailu/unbound:2.0
+    restart: always
+    networks:
+      - mailu_network
+    labels:
+      - "com.example.description=DNS resolver"
+    healthcheck:
+      test: ["CMD", "dig", "@127.0.0.1", "localhost"]
+      interval: 1m
+      timeout: 10s
+      retries: 3
+    deploy:
+      resources:
+        limits:
+          cpus: '0.25'
+          memory: '128M'
+
+  admin:
+    image: mailu/admin:2.0
+    restart: always
+    env_file: .env
+    networks:
+      - mailu_network
+    volumes:
+      - data:/data
+    secrets:
+      - ADMIN
+      - ADMIN_PASSWORD
+    depends_on:
+      - redis
+    labels:
+      - "com.example.description=Mailu admin interface"
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost/admin"]
+      interval: 1m
+      timeout: 10s
+      retries: 3
+    deploy:
+      resources:
+        limits:
+          cpus: '0.50'
+          memory: '256M'
+
+  imap:
+    image: mailu/dovecot:2.0
+    restart: always
+    env_file: .env
+    networks:
+      - mailu_network
+    volumes:
+      - mail:/mail
+      - overrides:/overrides
+    depends_on:
+      - front
+    labels:
+      - "com.example.description=IMAP service"
+    healthcheck:
+      test: ["CMD", "dovecot", "-n"]
+      interval: 1m
+      timeout: 10s
+      retries: 3
+    deploy:
+      resources:
+        limits:
+          cpus: '0.50'
+          memory: '256M'
+
+  smtp:
+    image: mailu/postfix:2.0
+    restart: always
+    env_file: .env
+    networks:
+      - mailu_network
+    volumes:
+      - overrides:/overrides
+    depends_on:
+      - front
+    labels:
+      - "com.example.description=SMTP service"
+    healthcheck:
+      test: ["CMD", "postfix", "status"]
+      interval: 1m
+      timeout: 10s
+      retries: 3
+    deploy:
+      resources:
+        limits:
+          cpus: '0.50'
+          memory: '256M'
+
+  antivirus:
+    image: mailu/clamav:2.0
+    restart: always
+    networks:
+      - mailu_network
+    labels:
+      - "com.example.description=Antivirus scanner"
+    healthcheck:
+      test: ["CMD", "clamdscan", "--version"]
+      interval: 1m
+      timeout: 10s
+      retries: 3
+    deploy:
+      resources:
+        limits:
+          cpus: '0.50'
+          memory: '256M'
+
+  antispam:
+    image: mailu/rspamd:2.0
+    restart: always
+    env_file: .env
+    networks:
+      - mailu_network
+    volumes:
+      - filter:/var/lib/rspamd
+    labels:
+      - "com.example.description=Antispam service"
+    healthcheck:
+      test: ["CMD", "rspamadm", "configtest"]
+      interval: 1m
+      timeout: 10s
+      retries: 3
+    deploy:
+      resources:
+        limits:
+          cpus: '0.50'
+          memory: '256M'
+
+  backup:
+    image: alpine
+    container_name: mailu_backup
+    networks:
+      - mailu_network
+    volumes:
+      - data:/data
+      - mail:/mail
+      - filter:/filter
+      - overrides:/overrides
+      - backup:/backup
+    entrypoint: >
+      sh -c "while true; do
+      tar czf /backup/mailu-backup-$(date +%F).tar.gz /data /mail /filter /overrides;
+      find /backup -type f -mtime +7 -name '*.tar.gz' -delete;
+      sleep 86400;
+      done"
+    labels:
+      - "com.example.description=Backup service"
+
+networks:
+  mailu_network:
+    driver: bridge
+
+volumes:
+  certs:
+  overrides:
+  data:
+  mail:
+  filter:
+  backup:
+
+secrets:
+  DOMAIN:
+    file: ./secrets/DOMAIN
+  HOSTNAMES:
+    file: ./secrets/HOSTNAMES
+  ADMIN:
+    file: ./secrets/ADMIN
+  ADMIN_PASSWORD:
+    file: ./secrets/ADMIN_PASSWORD
